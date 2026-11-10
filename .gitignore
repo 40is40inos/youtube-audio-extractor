@@ -7,6 +7,11 @@
 !/README.md
 !/app.py
 !/ui/
+!/build.py
+!/tools/
+!/installer/
+!/Install Extractor.bat
+# (.venv, build/ and dist/ stay ignored by the rule above)
 !/audio_extractor_gui.py
 !/Launch_Extractor_GUI.bat
 !/rip.sh

@@ -1,4 +1,9 @@
-/* Extractor UI. Dark only, one accent. Motion follows three tokens below. */
+/* Extractor UI. Dark only, one accent. Motion follows three tokens below.
+   The accent is the brand lime until a video loads; then app.js swaps in a colour taken
+   from its artwork. Registering it as a <color> lets that change fade instead of snap. */
+
+@property --accent { syntax: "<color>"; inherits: true; initial-value: #d4f34a; }
+@property --accent-ink { syntax: "<color>"; inherits: true; initial-value: #12150a; }
 
 :root {
   --bg: #0a0a0c;
@@ -11,7 +16,12 @@
   --faint: #66666f;
   --accent: #d4f34a;
   --accent-ink: #12150a;
-  --accent-soft: rgba(212, 243, 74, 0.12);
+  --accent-soft: color-mix(in oklab, var(--accent) 12%, transparent);
+  --accent-line: color-mix(in oklab, var(--accent) 50%, transparent);
+  --accent-ring: color-mix(in oklab, var(--accent) 10%, transparent);
+  --accent-glow: color-mix(in oklab, var(--accent) 65%, transparent);
+  --accent-hover: color-mix(in oklab, var(--accent), white 14%);
+  transition: --accent 800ms ease, --accent-ink 800ms ease;
   --danger: #ff6b6b;
   --warn: #ffbd5a;
 
@@ -41,7 +51,7 @@ html, body {
 button, input, select { font: inherit; color: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-::selection { background: rgba(212, 243, 74, 0.3); }
+::selection { background: color-mix(in oklab, var(--accent) 30%, transparent); }
 
 .ico {
   width: 16px;
@@ -73,7 +83,7 @@ button { -webkit-tap-highlight-color: transparent; }
 
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .brand-mark { width: 22px; height: 22px; flex: none; }
-.brand-label { fill: var(--accent); }
+.brand-label { fill: #d4f34a; } /* the logo keeps the brand colour; only the deck follows the art */
 .brand-name { font: 700 16px/1 var(--font-display); letter-spacing: -0.02em; }
 .brand-sub { color: var(--faint); font-size: 12.5px; white-space: nowrap; }
 
@@ -159,7 +169,7 @@ button { -webkit-tap-highlight-color: transparent; }
   .btn.solid:hover:not(:disabled) { background: #ffffff; }
   .btn.ghost:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
   .chip:hover:not(:disabled) { background: rgba(255, 255, 255, 0.09); }
-  .chip.accent:hover { background: #e0fa66; }
+  .chip.accent:hover { background: var(--accent-hover); }
   .icon-btn:hover:not(:disabled) { color: var(--fg); background: #1e1e23; }
   .icon-btn.sm:hover { background: rgba(255, 255, 255, 0.07); }
 }
@@ -230,7 +240,12 @@ button { -webkit-tap-highlight-color: transparent; }
   aspect-ratio: 1;
   translate: -50% -50%;
   border-radius: 50%;
-  background: radial-gradient(circle closest-side, rgba(212, 243, 74, 0.15), rgba(212, 243, 74, 0.04) 55%, transparent 76%);
+  background: radial-gradient(
+    circle closest-side,
+    color-mix(in oklab, var(--accent) 16%, transparent),
+    color-mix(in oklab, var(--accent) 4%, transparent) 55%,
+    transparent 76%
+  );
   opacity: 0;
   transition: opacity 800ms ease;
   pointer-events: none;
@@ -465,7 +480,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .stage-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); transition: background-color 200ms ease, box-shadow 200ms ease; }
 .app:is([data-state="ready"], [data-state="running"], [data-state="done"]) .stage-dot {
   background: var(--accent);
-  box-shadow: 0 0 10px rgba(212, 243, 74, 0.7);
+  box-shadow: 0 0 10px var(--accent-glow);
 }
 .app[data-state="done"] .stage { color: var(--accent); background: var(--accent-soft); }
 .app[data-state="failed"] .stage { color: #ffb3b3; background: rgba(255, 107, 107, 0.1); }
@@ -573,8 +588,8 @@ button { -webkit-tap-highlight-color: transparent; }
 }
 .input:focus-within {
   background: #19191e;
-  border-color: rgba(212, 243, 74, 0.5);
-  box-shadow: 0 0 0 3px rgba(212, 243, 74, 0.1);
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 .input input {
   flex: 1;
@@ -643,7 +658,7 @@ button { -webkit-tap-highlight-color: transparent; }
   width: calc((100% - 8px) / 7);
   border-radius: 8px;
   background: var(--accent);
-  box-shadow: 0 6px 16px -6px rgba(212, 243, 74, 0.6);
+  box-shadow: 0 6px 16px -6px color-mix(in oklab, var(--accent) 60%, transparent);
   transition: transform 260ms var(--ease-out);
 }
 .seg button {
@@ -693,8 +708,8 @@ select {
 }
 select:focus-visible {
   outline: 0;
-  border-color: rgba(212, 243, 74, 0.5);
-  box-shadow: 0 0 0 3px rgba(212, 243, 74, 0.1);
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 option { background: #1a1a1f; color: var(--fg); }
 
@@ -712,7 +727,10 @@ option { background: #1a1a1f; color: var(--fg); }
   font: 700 15.5px/1 var(--font-display);
   letter-spacing: -0.01em;
   cursor: pointer;
-  box-shadow: 0 12px 30px -14px rgba(212, 243, 74, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.45), inset 0 -2px 0 rgba(0, 0, 0, 0.12);
+  box-shadow:
+    0 12px 30px -14px color-mix(in oklab, var(--accent) 70%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.12);
   transition: transform 140ms var(--ease-out), background-color 220ms ease, color 220ms ease, box-shadow 220ms ease;
 }
 .primary:active:not(:disabled) { transform: scale(0.97); }
@@ -720,7 +738,7 @@ option { background: #1a1a1f; color: var(--fg); }
 .primary[data-mode="confirm"] { background: var(--danger); color: #230808; box-shadow: 0 12px 30px -14px rgba(255, 107, 107, 0.7); }
 .primary:disabled { background: #1a1a1e; color: var(--faint); box-shadow: inset 0 0 0 1px var(--line); cursor: default; }
 @media (hover: hover) and (pointer: fine) {
-  .primary[data-mode="extract"]:hover:not(:disabled) { background: #dffa62; }
+  .primary[data-mode="extract"]:hover:not(:disabled) { background: var(--accent-hover); }
   .primary[data-mode="stop"]:hover { background: #26262c; }
 }
 .go-kbd {
@@ -756,7 +774,11 @@ option { background: #1a1a1f; color: var(--fg); }
 }
 .notice[data-leaving] { opacity: 0; transition-duration: 140ms; }
 .notice[data-level="error"] { background: rgba(255, 107, 107, 0.08); border-color: rgba(255, 107, 107, 0.2); color: #ffc2c2; }
-.notice[data-level="ok"] { background: var(--accent-soft); border-color: rgba(212, 243, 74, 0.2); color: #e7f7a8; }
+.notice[data-level="ok"] {
+  background: var(--accent-soft);
+  border-color: color-mix(in oklab, var(--accent) 20%, transparent);
+  color: color-mix(in oklab, var(--accent) 65%, white);
+}
 .notice p { flex: 1; margin: 3px 0 0; }
 .notice .icon-btn.sm { width: 24px; height: 24px; color: inherit; opacity: 0.7; }
 
@@ -821,7 +843,7 @@ option { background: #1a1a1f; color: var(--fg); }
   position: absolute;
   inset: 0;
   border-radius: 12px;
-  background: rgba(212, 243, 74, 0.13);
+  background: color-mix(in oklab, var(--accent) 13%, transparent);
   animation: fade-out 800ms ease-out forwards;
   pointer-events: none;
 }
@@ -934,6 +956,9 @@ option { background: #1a1a1f; color: var(--fg); }
   outline: none;
   color: #b9b9c2;
   font: 12px/1.6 var(--mono);
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
   white-space: pre-wrap;
   word-break: break-all;
   scrollbar-width: thin;

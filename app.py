@@ -1,8 +1,9 @@
 """Extractor: a local web UI over yt-dlp and ffmpeg for saving YouTube audio.
 
-Serves the interface in ui/ on 127.0.0.1 and opens it in a frameless Edge (or
-Chrome) app window. Standard library only. The server exits on its own a few
-seconds after the window is closed.
+Serves the interface in ui/ on 127.0.0.1 and shows it in a native window
+(pywebview on WebView2). Without pywebview installed it falls back to a
+frameless Edge or Chrome app window, which needs nothing beyond the standard
+library. Packaged as Extractor.exe by build.py.
 
     pythonw app.py                 normal launch (what Launch_Extractor_GUI.bat runs)
     python app.py --dev            serve only: no window, no idle shutdown, prints the URL
@@ -34,8 +35,36 @@ from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
-UI_DIR = APP_DIR / "ui"
+__version__ = "2.1.0"
+APP_NAME = "Extractor"
+
+
+def _resource_dir() -> Path:
+    """Where the ui/ folder lives. PyInstaller unpacks bundled data under sys._MEIPASS."""
+    return Path(getattr(sys, "_MEIPASS", None) or Path(__file__).resolve().parent)
+
+
+def _home_dir() -> Path:
+    """The folder that holds yt-dlp.exe, ffmpeg.exe and the music subfolders.
+
+    From source it is this folder. An installed Extractor.exe reads it from the home.json
+    the installer writes next to the exe; a portable exe uses its own folder.
+    """
+    if not getattr(sys, "frozen", False):
+        return Path(__file__).resolve().parent
+    exe_dir = Path(sys.executable).resolve().parent
+    try:
+        home = Path(json.loads((exe_dir / "home.json").read_text("utf-8-sig"))["home"])
+        if home.is_dir():
+            return home
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return exe_dir
+
+
+APP_DIR = _home_dir()
+UI_DIR = _resource_dir() / "ui"
+ICON = UI_DIR / "extractor.ico"
 YTDLP = APP_DIR / "yt-dlp.exe"
 FFMPEG = APP_DIR / "ffmpeg.exe"
 DEFAULT_DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "YouTubeAudioExtractor"
@@ -45,12 +74,14 @@ APP_ID = "youtube-audio-extractor"
 FORMATS = ("mp3", "opus", "m4a", "flac", "wav", "aac", "best")
 BROWSERS = ("chrome", "firefox", "edge", "brave")
 DEFAULT_FOLDER = "YoutubeExtracts"
-HIDDEN_DIRS = {"__pycache__", "temp", "ui"}
+HIDDEN_DIRS = {"__pycache__", "temp", "ui", "build", "dist", "installer", "tools"}
 AUDIO_EXTS = {".mp3", ".opus", ".m4a", ".flac", ".wav", ".aac", ".ogg", ".webm", ".mka", ".alac"}
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 PROGRESS_TAG = "@@progress "
 DESTINATION = re.compile(r"^\[(?:download|ExtractAudio)\] Destination: (.+)$")
 THUMB_PREFIX = "https://i.ytimg.com/"
+THUMB_URL = re.compile(r"^https://i\.ytimg\.com/vi/[A-Za-z0-9_-]{11}/(?:maxresdefault|sddefault|hqdefault|mqdefault)\.jpg$")
+WINDOW_BG = "#0A0A0C"
 
 STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -161,7 +192,19 @@ def list_folders(custom: list) -> list:
                 names.append(entry.name)
     except OSError:
         pass
-    folders = [{"value": name, "label": name} for name in names]
+    folders = []
+    for name in names:
+        folders.append({"value": name, "label": name})
+        if name != DEFAULT_FOLDER:
+            continue
+        # The default folder often holds the real library (one folder per playlist or person).
+        try:
+            children = sorted((APP_DIR / name).iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            children = []
+        for child in children:
+            if child.is_dir() and not child.name.startswith("."):
+                folders.append({"value": f"{name}\\{child.name}", "label": f"{name} › {child.name}"})
     for path in custom:
         if isinstance(path, str) and Path(path).is_dir():
             folders.append({"value": path, "label": path, "custom": True})
@@ -284,6 +327,136 @@ def to_number(raw) -> float | None:
     return value if value >= 0 else None
 
 
+# --------------------------------------------------------------------------- Windows shell integration
+
+
+class GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", ctypes.c_ulong),
+        ("Data2", ctypes.c_ushort),
+        ("Data3", ctypes.c_ushort),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+    @classmethod
+    def parse(cls, text: str) -> "GUID":
+        import uuid
+
+        return cls.from_buffer_copy(uuid.UUID(text).bytes_le)
+
+
+class FLASHWINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint),
+        ("hwnd", ctypes.c_void_p),
+        ("dwFlags", ctypes.c_uint),
+        ("uCount", ctypes.c_uint),
+        ("dwTimeout", ctypes.c_uint),
+    ]
+
+
+def find_own_window(title: str) -> int | None:
+    """The visible top-level window of this process with the given title."""
+    if os.name != "nt":
+        return None
+    user32 = ctypes.WinDLL("user32")
+    found: list[int] = []
+    pid = os.getpid()
+    callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def visit(hwnd, _param):
+        owner = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(ctypes.c_void_p(hwnd)):
+            buffer = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(ctypes.c_void_p(hwnd), buffer, 256)
+            if buffer.value == title:
+                found.append(hwnd)
+        return True
+
+    user32.EnumWindows(callback_type(visit), None)
+    return found[0] if found else None
+
+
+def style_title_bar(hwnd: int) -> None:
+    """Dark caption that matches the app background (Windows 11; older Windows ignores it)."""
+    dwmapi = ctypes.WinDLL("dwmapi")
+
+    def set_attribute(attribute: int, value: int) -> None:
+        data = ctypes.c_int(value)
+        dwmapi.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), attribute, ctypes.byref(data), ctypes.sizeof(data))
+
+    set_attribute(20, 1)  # DWMWA_USE_IMMERSIVE_DARK_MODE
+    set_attribute(35, 0x000C0A0A)  # DWMWA_CAPTION_COLOR, 0x00BBGGRR for #0A0A0C
+    set_attribute(36, 0x00F0EDED)  # DWMWA_TEXT_COLOR, #EDEDF0
+    set_attribute(34, 0x00221E1E)  # DWMWA_BORDER_COLOR, #1E1E22
+
+
+def flash_if_inactive(hwnd: int) -> None:
+    user32 = ctypes.WinDLL("user32")
+    user32.GetForegroundWindow.restype = ctypes.c_void_p
+    if user32.GetForegroundWindow() == hwnd:
+        return
+    info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd, 0x2 | 0xC, 0, 0)  # tray, until focused
+    user32.FlashWindowEx(ctypes.byref(info))
+
+
+def bring_to_front(hwnd: int) -> None:
+    user32 = ctypes.WinDLL("user32")
+    if user32.IsIconic(ctypes.c_void_p(hwnd)):
+        user32.ShowWindow(ctypes.c_void_p(hwnd), 9)  # SW_RESTORE
+    user32.SetForegroundWindow(ctypes.c_void_p(hwnd))
+
+
+class Taskbar:
+    """Download progress on the window's taskbar button, via ITaskbarList3.
+
+    COM objects are tied to the thread that created them, so one thread owns the
+    object and applies updates from a queue. Any failure just turns the feature off.
+    """
+
+    NONE, INDETERMINATE, NORMAL, ERROR = 0, 1, 2, 4
+
+    def __init__(self):
+        self.hwnd: int | None = None
+        self.updates: queue.Queue = queue.Queue()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def show(self, state: int, percent: float | None = None) -> None:
+        self.updates.put((state, percent))
+
+    def _run(self) -> None:
+        try:
+            ole32 = ctypes.WinDLL("ole32")
+            ole32.CoInitializeEx(None, 0x2)  # COINIT_APARTMENTTHREADED
+            ole32.CoCreateInstance.argtypes = [
+                ctypes.POINTER(GUID), ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p),
+            ]
+            ole32.CoCreateInstance.restype = ctypes.c_long
+            clsid = GUID.parse("56FDF344-FD6D-11D0-958A-006097C9A090")  # CLSID_TaskbarList
+            iid = GUID.parse("EA1AFB91-9E28-4B86-90E9-9E9F8A5EEFAF")  # IID_ITaskbarList3
+            this = ctypes.c_void_p()
+            if ole32.CoCreateInstance(ctypes.byref(clsid), None, 0x1, ctypes.byref(iid), ctypes.byref(this)) or not this:
+                return
+            vtable = ctypes.cast(ctypes.cast(this, ctypes.POINTER(ctypes.c_void_p))[0], ctypes.POINTER(ctypes.c_void_p))
+            method = ctypes.WINFUNCTYPE
+            hr_init = method(ctypes.c_long, ctypes.c_void_p)(vtable[3])
+            set_value = method(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_ulonglong)(vtable[9])
+            set_state = method(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int)(vtable[10])
+            if hr_init(this):
+                return
+        except (OSError, AttributeError, ValueError):
+            return
+        while True:
+            state, percent = self.updates.get()
+            if not self.hwnd:
+                continue
+            hwnd = ctypes.c_void_p(self.hwnd)
+            set_state(this, hwnd, state)
+            if state in (self.NORMAL, self.ERROR) and percent is not None:
+                set_value(this, hwnd, int(max(0.0, min(100.0, percent)) * 10), 1000)
+
+
 # --------------------------------------------------------------------------- state
 
 
@@ -354,6 +527,7 @@ class Hub:
     def __init__(self):
         self.lock = threading.Lock()
         self.clients: set[queue.Queue] = set()
+        self.listeners: list = []  # in-process observers, e.g. the taskbar
         self.ever_connected = False
         self.last_change = time.monotonic()
 
@@ -377,6 +551,11 @@ class Hub:
                 q.put_nowait(event)
             except queue.Full:
                 pass
+        for listener in self.listeners:
+            try:
+                listener(event)
+            except Exception:  # noqa: BLE001 - an observer must never break a job
+                traceback.print_exc()
 
     def idle_seconds(self) -> float:
         with self.lock:
@@ -848,7 +1027,7 @@ class Handler(BaseHTTPRequestHandler):
             self._static(*STATIC[parts.path])
             return
         if parts.path == "/api/hello":
-            self._json(200, {"app": APP_ID})
+            self._json(200, {"app": APP_ID, "pid": os.getpid()})
             return
         if not self._token_ok(query):
             self._json(401, {"error": "token"})
@@ -857,8 +1036,27 @@ class Handler(BaseHTTPRequestHandler):
             self._events()
         elif parts.path == "/api/state":
             self._json(200, self.app.state())
+        elif parts.path == "/api/thumb":
+            self._thumb((query.get("u") or [""])[0])
         else:
             self._json(404, {"error": "not_found"})
+
+    def _thumb(self, url: str) -> None:
+        """Same-origin copy of a YouTube thumbnail, so the page can read its colours."""
+        if not THUMB_URL.match(url):
+            self._json(400, {"error": "bad_thumb"})
+            return
+        body = self.app.thumbnail(url)
+        if body is None:
+            self._json(404, {"error": "no_thumb"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "private, max-age=86400")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _post(self) -> None:
         if not self._host_ok():
@@ -957,6 +1155,9 @@ class Handler(BaseHTTPRequestHandler):
         except Busy:
             self._json(409, {"error": "busy"})
             return
+        if not meta["title"] and youtube_id(url):
+            # Started before the page had the title (Enter pressed early): look it up alongside.
+            threading.Thread(target=self.app.fill_title, args=(job["id"], url), daemon=True).start()
         prefs = {"format": fmt, "cookies": cookies[:300]}
         if isinstance(body.get("folder"), str):
             prefs["folder"] = body["folder"][:1024]
@@ -985,7 +1186,7 @@ class Handler(BaseHTTPRequestHandler):
             start = str(APP_DIR)
         if not Path(start).is_dir():
             start = str(APP_DIR)
-        path = browse_folder(start)
+        path = self.app.pick_folder(start)
         if path:
             inside = Path(path).resolve()
             try:
@@ -1053,6 +1254,17 @@ class App:
         self.server: Server | None = None
         self.port = 0
         self.allowed_hosts: set[str] = set()
+        self.thumbs: collections.OrderedDict[str, bytes] = collections.OrderedDict()
+        self.thumb_lock = threading.Lock()
+        # Native window (pywebview) state
+        self.webview = None
+        self.window = None
+        self.hwnd: int | None = None
+        self.taskbar: Taskbar | None = None
+        self.window_title = APP_NAME
+        self.taskbar_shown: tuple | None = None
+        self.window_size: dict | None = None
+        self.window_maximized = False
 
     @property
     def url(self) -> str:
@@ -1072,8 +1284,49 @@ class App:
             },
             "history": self.store.history(),
             "ffmpeg_found": FFMPEG.is_file(),
+            "app_version": __version__,
             **snap,
         }
+
+    def fill_title(self, job_id: str, url: str) -> None:
+        info = self.preview(url)
+        with self.runner.lock:
+            job = self.runner.job
+            current = bool(job and job.get("id") == job_id and not job.get("title"))
+        if current and info.get("title"):
+            self.runner.update_job(title=info["title"], author=info.get("author"))
+
+    def thumbnail(self, url: str) -> bytes | None:
+        with self.thumb_lock:
+            if url in self.thumbs:
+                self.thumbs.move_to_end(url)
+                return self.thumbs[url]
+        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                body = response.read(2_000_001)
+        except (urllib.error.URLError, OSError, TimeoutError):
+            return None
+        if len(body) > 2_000_000:
+            return None
+        with self.thumb_lock:
+            self.thumbs[url] = body
+            while len(self.thumbs) > 24:
+                self.thumbs.popitem(last=False)
+        return body
+
+    def pick_folder(self, start: str) -> str | None:
+        if self.window is not None:
+            try:
+                picked = self.window.create_file_dialog(self.webview.FileDialog.FOLDER, directory=start)
+            except Exception:  # noqa: BLE001 - a failed dialog just means no folder
+                traceback.print_exc()
+                return None
+            if not picked:
+                return None
+            path = picked[0] if isinstance(picked, (list, tuple)) else picked
+            return os.path.normpath(path)
+        return browse_folder(start)
 
     def preview(self, url: str) -> dict:
         video = youtube_id(url)
@@ -1114,7 +1367,113 @@ class App:
         return result
 
     def open_window(self) -> None:
+        """Bring up the UI: focus the native window if there is one, else open a browser app window."""
+        if self.window is not None:
+            try:
+                self.window.restore()
+                self.window.show()
+            except Exception:  # noqa: BLE001
+                pass
+            if self.hwnd:
+                bring_to_front(self.hwnd)
+            return
         open_app_window(self.url, self.data_dir / "window")
+
+    # ---- native window
+
+    def run_native_window(self) -> bool:
+        """Show the UI in a pywebview window and block until it is closed. False without pywebview."""
+        try:
+            import webview
+        except ImportError:
+            return False
+        self.webview = webview
+        saved = self.store.prefs().get("window")
+        saved = saved if isinstance(saved, dict) else {}
+
+        def dimension(key: str, default: int, low: int, high: int) -> int:
+            value = saved.get(key)
+            return min(high, max(low, value)) if isinstance(value, int) else default
+
+        if os.name == "nt" and not getattr(sys, "frozen", False):
+            # From source the process is python.exe; give the window its own taskbar identity.
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Extractor.App")
+        self.window = webview.create_window(
+            APP_NAME,
+            self.url,
+            width=dimension("width", 1120, 860, 3800),
+            height=dimension("height", 780, 620, 2400),
+            min_size=(860, 620),
+            maximized=bool(saved.get("maximized")),
+            background_color=WINDOW_BG,
+        )
+        self.window.events.shown += self._on_shown
+        self.window.events.resized += self._on_resized
+        self.hub.listeners.append(self._on_event)
+        webview.start(icon=str(ICON) if ICON.is_file() else None, private_mode=True)
+        if self.window_size:
+            self.store.update_prefs({"window": {**self.window_size, "maximized": self.window_maximized}})
+        return True
+
+    def _on_shown(self) -> None:
+        hwnd = find_own_window(APP_NAME)
+        if not hwnd:
+            return
+        self.hwnd = hwnd
+        try:
+            style_title_bar(hwnd)
+        except OSError:
+            pass
+        self.taskbar = Taskbar()
+        self.taskbar.hwnd = hwnd
+
+    def _on_resized(self, width: int, height: int) -> None:
+        if not self.hwnd:
+            return
+        user32 = ctypes.WinDLL("user32")
+        if user32.IsIconic(ctypes.c_void_p(self.hwnd)):
+            return
+        self.window_maximized = bool(user32.IsZoomed(ctypes.c_void_p(self.hwnd)))
+        if not self.window_maximized:
+            self.window_size = {"width": width, "height": height}
+
+    def _set_title(self, text: str) -> None:
+        if text != self.window_title and self.window is not None:
+            self.window_title = text
+            self.window.set_title(text)
+
+    def _show_progress(self, state: int, percent: float | None = None) -> None:
+        shown = (state, None if percent is None else int(percent))
+        if self.taskbar and shown != self.taskbar_shown:
+            self.taskbar_shown = shown
+            self.taskbar.show(state, percent)
+
+    def _on_event(self, event: dict) -> None:
+        """Mirror job progress on the taskbar button and the window title."""
+        if event.get("type") != "job" or not self.hwnd:
+            return
+        job = event["job"]
+        status = job.get("status")
+        if job.get("kind") != "extract":
+            self._show_progress(Taskbar.INDETERMINATE if status == "running" else Taskbar.NONE)
+            return
+        if status == "running":
+            progress = job.get("progress")
+            if job.get("stage") == "downloading" and progress is not None:
+                self._show_progress(Taskbar.NORMAL, progress)
+                self._set_title(f"{int(progress)}% · {APP_NAME}")
+            else:
+                self._show_progress(Taskbar.INDETERMINATE)
+                self._set_title(f"Converting · {APP_NAME}" if job.get("stage") == "converting" else APP_NAME)
+            return
+        self._set_title(APP_NAME)
+        if status == "failed":
+            self._show_progress(Taskbar.ERROR, 100)
+            threading.Timer(5, lambda: None if self.runner.busy() else self._show_progress(Taskbar.NONE)).start()
+        else:
+            self._show_progress(Taskbar.NONE)
+        if status in ("done", "failed"):
+            flash_if_inactive(self.hwnd)
 
     def watchdog(self) -> None:
         """Exit once no window has been connected for a while (the user closed it)."""
@@ -1163,17 +1522,20 @@ def open_app_window(url: str, profile: Path) -> None:
     webbrowser.open(url)
 
 
-def running_instance(port: int) -> bool:
+def running_instance(port: int) -> int | None:
+    """The process id of an Extractor already serving on this port, if any."""
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/hello", timeout=0.8) as response:
-            return json.loads(response.read().decode("utf-8")).get("app") == APP_ID
+            data = json.loads(response.read().decode("utf-8"))
     except (OSError, ValueError):
-        return False
+        return None
+    return int(data.get("pid") or 0) if data.get("app") == APP_ID else None
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Extractor: YouTube audio via yt-dlp")
+    parser = argparse.ArgumentParser(description=f"{APP_NAME} {__version__}: save audio from video links")
     parser.add_argument("--dev", action="store_true", help="serve only: no window, no idle shutdown")
+    parser.add_argument("--browser", action="store_true", help="use an Edge/Chrome app window, not the native one")
     parser.add_argument("--port", type=int, default=0, help=f"port to serve on (default {PREFERRED_PORT})")
     parser.add_argument("--token", default="", help="fixed API token (dev only)")
     parser.add_argument("--data-dir", default="", help="where to keep prefs and history")
@@ -1187,7 +1549,10 @@ def main() -> None:
         sys.stderr = sys.stderr or stream
 
     port = args.port or PREFERRED_PORT
-    if not args.dev and running_instance(port):
+    existing = None if args.dev else running_instance(port)
+    if existing is not None:
+        if existing and os.name == "nt":
+            ctypes.windll.user32.AllowSetForegroundWindow(existing)  # let it come to the front
         request = urllib.request.Request(f"http://127.0.0.1:{port}/api/reopen", data=b"{}", method="POST")
         try:
             urllib.request.urlopen(request, timeout=3).close()
@@ -1207,17 +1572,31 @@ def main() -> None:
     app.allowed_hosts = {f"127.0.0.1:{app.port}", f"localhost:{app.port}"}
 
     threading.Thread(target=app.runner.refresh_version, daemon=True).start()
-    print(f"Extractor running at {app.url}", flush=True)
-    if not args.dev:
-        app.open_window()
-        threading.Thread(target=app.watchdog, daemon=True).start()
+    print(f"{APP_NAME} {__version__} running at {app.url}", flush=True)
+    if args.dev:
+        try:
+            server.serve_forever(poll_interval=0.5)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            app.stopping.set()
+            app.runner.stop()
+            server.server_close()
+        return
+
+    serving = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True)
+    serving.start()
     try:
-        server.serve_forever(poll_interval=0.5)
+        # The native window blocks until it is closed. Without pywebview, open a browser
+        # app window instead and stay alive until no window has been connected for a while.
+        if args.browser or not app.run_native_window():
+            app.open_window()
+            app.watchdog()
     except KeyboardInterrupt:
         pass
     finally:
-        app.stopping.set()
-        app.runner.stop()
+        app.shutdown()
+        serving.join(timeout=5)
         server.server_close()
 
 

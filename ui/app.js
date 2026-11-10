@@ -363,6 +363,114 @@
     });
   }
 
+  // ------------------------------------------------------------------ accent from artwork
+
+  const BRAND = { accent: '#d4f34a', ink: '#12150a' };
+  const toLinear = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const toGamma = (c) => (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
+
+  function rgbToOklab(r, g, b) {
+    const lr = toLinear(r);
+    const lg = toLinear(g);
+    const lb = toLinear(b);
+    const l = Math.cbrt(0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb);
+    const m = Math.cbrt(0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb);
+    const s = Math.cbrt(0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb);
+    return [
+      0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+      1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+      0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+    ];
+  }
+
+  // Linear sRGB for an OKLCH colour (hue in radians). Channels outside 0..1 are out of gamut.
+  function oklchToLinear(L, C, h) {
+    const a = C * Math.cos(h);
+    const b = C * Math.sin(h);
+    const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+    const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+    const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
+    return [
+      4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+      -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+      -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+    ];
+  }
+
+  // Lower the chroma until the colour fits sRGB, so the hue stays true instead of clipping.
+  function hexFromOklch(L, C, h) {
+    let chroma = C;
+    let rgb = oklchToLinear(L, chroma, h);
+    while (chroma > 0 && rgb.some((v) => v < -0.0005 || v > 1.0005)) {
+      chroma = Math.max(0, chroma - 0.004);
+      rgb = oklchToLinear(L, chroma, h);
+    }
+    const byte = (v) => Math.round(toGamma(Math.min(1, Math.max(0, v))) * 255).toString(16).padStart(2, '0');
+    return `#${rgb.map(byte).join('')}`;
+  }
+
+  // The artwork's most vivid colour family, weighted towards saturated mid-tones.
+  function dominantHue(data) {
+    const count = 36;
+    const buckets = Array.from({ length: count }, () => ({ w: 0, a: 0, b: 0, c: 0 }));
+    let samples = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] < 128) continue;
+      samples += 1;
+      const [L, A, B] = rgbToOklab(data[i] / 255, data[i + 1] / 255, data[i + 2] / 255);
+      const C = Math.hypot(A, B);
+      if (C < 0.045 || L < 0.22 || L > 0.96) continue;
+      const degrees = ((Math.atan2(B, A) * 180) / Math.PI + 360) % 360;
+      const bucket = buckets[Math.floor(degrees / (360 / count)) % count];
+      const w = C * C * (1.15 - Math.abs(L - 0.62));
+      bucket.w += w;
+      bucket.a += A * w;
+      bucket.b += B * w;
+      bucket.c += C * w;
+    }
+    let best = -1;
+    let bestWeight = 0;
+    for (let k = 0; k < count; k += 1) {
+      const weight = buckets[k].w + 0.5 * (buckets[(k + count - 1) % count].w + buckets[(k + 1) % count].w);
+      if (weight > bestWeight) {
+        bestWeight = weight;
+        best = k;
+      }
+    }
+    if (best < 0 || bestWeight < samples * 0.0006) return null; // greyscale or dark art
+    const bucket = buckets[best];
+    return { hue: Math.atan2(bucket.b, bucket.a), chroma: bucket.c / bucket.w };
+  }
+
+  async function accentFromArt(src) {
+    const res = await fetch(`/api/thumb?u=${encodeURIComponent(src)}`, { headers: { 'X-Token': TOKEN } });
+    if (!res.ok) return null;
+    const bitmap = await createImageBitmap(await res.blob(), { resizeWidth: 64, resizeHeight: 36, resizeQuality: 'medium' });
+    const canvas = new OffscreenCanvas(64, 36);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const found = dominantHue(ctx.getImageData(0, 0, 64, 36).data);
+    if (!found) return null;
+    // Fixed lightness keeps dark text on the accent readable whatever the artwork.
+    const chroma = Math.min(0.19, Math.max(0.1, found.chroma * 1.25));
+    return { accent: hexFromOklch(0.86, chroma, found.hue), ink: hexFromOklch(0.2, 0.045, found.hue) };
+  }
+
+  let accentSeq = 0;
+  async function setAccent(src) {
+    const seq = ++accentSeq;
+    let colours = null;
+    if (src) {
+      try { colours = await accentFromArt(src); } catch { colours = null; }
+    }
+    if (seq !== accentSeq) return;
+    const { accent, ink } = colours || BRAND;
+    S.accent = accent;
+    document.documentElement.style.setProperty('--accent', accent);
+    document.documentElement.style.setProperty('--accent-ink', ink);
+  }
+
   let ambFront = null;
   function setAmbient(src) {
     if (src === S.ambientSrc) return;
@@ -387,6 +495,7 @@
     if (src === S.labelSrc) return;
     S.labelSrc = src;
     setAmbient(ambient || src);
+    setAccent(src ? ambient || src : null);
     if (src) {
       el.labelImg.src = src;
       el.label.dataset.hasImg = '';
@@ -544,6 +653,9 @@
     }
     const prev = S.job;
     S.job = job;
+    // A run the current preview doesn't describe (started early, or the page was reloaded):
+    // put its own artwork on the record.
+    if (job.thumb && job.id !== S.ackId && !(S.preview && S.previewFor === job.url)) setLabel(job.thumb, job.thumb);
     if (job.status !== 'running') {
       S.stopArmed = false;
       clearTimeout(stopTimer);
@@ -1136,6 +1248,10 @@
       }
     });
     window.addEventListener('focus', () => setTimeout(checkClipboard, 150));
+    // An app, not a web page: no browser context menu outside text fields and the log.
+    document.addEventListener('contextmenu', (e) => {
+      if (!e.target.closest('input, .log')) e.preventDefault();
+    });
     motionQuery.addEventListener('change', (e) => { reduced = e.matches; applyMotion(); });
   }
 
@@ -1165,6 +1281,7 @@
     renderRecent(state.history || []);
     S.version = state.version;
     renderVersion();
+    if (state.app_version) document.querySelector('.brand').title = `Extractor ${state.app_version}`;
     if (!state.ffmpeg_found) {
       addNotice({ level: 'warn', code: 'ffmpeg', text: 'ffmpeg.exe isn’t next to the app, so converting audio will fail. See the README.' });
     }
