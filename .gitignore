@@ -1,0 +1,13 @@
+# This folder also holds downloaded music, the yt-dlp/ffmpeg binaries and
+# YouTube cookie exports. Ignore everything by default and allow only the
+# tool's own files, so none of that can be committed by accident.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/audio_extractor_gui.py
+!/Launch_Extractor_GUI.bat
+!/rip.sh
+
+# Never commit cookies, even if one is added above by mistake.
+*cookie*.txt
