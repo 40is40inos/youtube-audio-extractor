@@ -478,7 +478,7 @@ button { -webkit-tap-highlight-color: transparent; }
   transition: background-color 200ms ease, color 200ms ease;
 }
 .stage-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); transition: background-color 200ms ease, box-shadow 200ms ease; }
-.app:is([data-state="ready"], [data-state="running"], [data-state="done"]) .stage-dot {
+.app:is([data-state="ready"], [data-state="running"], [data-state="done"], [data-state="setup"]) .stage-dot {
   background: var(--accent);
   box-shadow: 0 0 10px var(--accent-glow);
 }
@@ -738,7 +738,7 @@ option { background: #1a1a1f; color: var(--fg); }
 .primary[data-mode="confirm"] { background: var(--danger); color: #230808; box-shadow: 0 12px 30px -14px rgba(255, 107, 107, 0.7); }
 .primary:disabled { background: #1a1a1e; color: var(--faint); box-shadow: inset 0 0 0 1px var(--line); cursor: default; }
 @media (hover: hover) and (pointer: fine) {
-  .primary[data-mode="extract"]:hover:not(:disabled) { background: var(--accent-hover); }
+  .primary:is([data-mode="extract"], [data-mode="setup"]):hover:not(:disabled) { background: var(--accent-hover); }
   .primary[data-mode="stop"]:hover { background: #26262c; }
 }
 .go-kbd {

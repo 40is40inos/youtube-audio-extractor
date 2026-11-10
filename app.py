@@ -5,6 +5,9 @@ Serves the interface in ui/ on 127.0.0.1 and shows it in a native window
 frameless Edge or Chrome app window, which needs nothing beyond the standard
 library. Packaged as Extractor.exe by build.py.
 
+On first run without yt-dlp and FFmpeg it offers to download both from their
+official GitHub releases, verifying each against its published SHA-256.
+
     pythonw app.py                 normal launch (what Launch_Extractor_GUI.bat runs)
     python app.py --dev            serve only: no window, no idle shutdown, prints the URL
 """
@@ -15,6 +18,8 @@ import argparse
 import collections
 import ctypes
 from glob import escape as glob_escape
+import hashlib
+import http.client
 import json
 import os
 import queue
@@ -31,11 +36,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import zipfile
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 APP_NAME = "Extractor"
 
 
@@ -44,36 +50,42 @@ def _resource_dir() -> Path:
     return Path(getattr(sys, "_MEIPASS", None) or Path(__file__).resolve().parent)
 
 
-def _home_dir() -> Path:
-    """The folder that holds yt-dlp.exe, ffmpeg.exe and the music subfolders.
-
-    From source it is this folder. An installed Extractor.exe reads it from the home.json
-    the installer writes next to the exe; a portable exe uses its own folder.
-    """
-    if not getattr(sys, "frozen", False):
-        return Path(__file__).resolve().parent
-    exe_dir = Path(sys.executable).resolve().parent
-    try:
-        home = Path(json.loads((exe_dir / "home.json").read_text("utf-8-sig"))["home"])
-        if home.is_dir():
-            return home
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    return exe_dir
-
-
-APP_DIR = _home_dir()
+SOURCE_DIR = Path(__file__).resolve().parent
 UI_DIR = _resource_dir() / "ui"
 ICON = UI_DIR / "extractor.ico"
-YTDLP = APP_DIR / "yt-dlp.exe"
-FFMPEG = APP_DIR / "ffmpeg.exe"
 DEFAULT_DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "YouTubeAudioExtractor"
 PREFERRED_PORT = 47361
 APP_ID = "youtube-audio-extractor"
 
+# Where music is saved and where the tools are found. configure_paths() sets these at startup.
+HOME_DIR = SOURCE_DIR  # relative save folders live here
+DEFAULT_FOLDER = "YoutubeExtracts"  # the default save folder, inside HOME_DIR
+COOKIE_DIR = SOURCE_DIR  # where exported cookies.txt files are looked for
+LEGACY_TOOLS: Path | None = SOURCE_DIR  # yt-dlp.exe and ffmpeg.exe placed by hand, used when present
+TOOLS_DIR = DEFAULT_DATA_DIR / "tools"  # where first-run setup downloads them
+
+# The tools first-run setup downloads, from their official GitHub releases. Each download is
+# checked against the SHA-256 its release publishes before it is used.
+TOOL_DOWNLOADS = {
+    "yt-dlp": {
+        "label": "yt-dlp",
+        "url": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
+        "sums": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS",
+        "asset": "yt-dlp.exe",
+        "approx_mb": 24,
+    },
+    "ffmpeg": {
+        # yt-dlp's own FFmpeg builds, which carry fixes for yt-dlp. The "shared" build is the smallest.
+        "label": "FFmpeg",
+        "url": "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip",
+        "sums": "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/checksums.sha256",
+        "asset": "ffmpeg-master-latest-win64-gpl-shared.zip",
+        "approx_mb": 91,
+    },
+}
+
 FORMATS = ("mp3", "opus", "m4a", "flac", "wav", "aac", "best")
 BROWSERS = ("chrome", "firefox", "edge", "brave")
-DEFAULT_FOLDER = "YoutubeExtracts"
 HIDDEN_DIRS = {"__pycache__", "temp", "ui", "build", "dist", "installer", "tools"}
 AUDIO_EXTS = {".mp3", ".opus", ".m4a", ".flac", ".wav", ".aac", ".ogg", ".webm", ".mka", ".alac"}
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -111,6 +123,106 @@ ERROR_PATTERNS = (
 
 class Busy(Exception):
     """Another extraction or update is already running."""
+
+
+class SetupError(Exception):
+    """First-run setup failed; code is what the UI explains."""
+
+    def __init__(self, code: str, detail: str | None = None):
+        super().__init__(detail or code)
+        self.code = code
+        self.detail = detail
+
+
+class Stopped(Exception):
+    """The user stopped the running job."""
+
+
+# --------------------------------------------------------------------------- paths
+
+
+def known_music_dir() -> Path:
+    """The user's Music folder, wherever Windows keeps it (it may be moved, e.g. into OneDrive)."""
+    if os.name == "nt":
+        try:
+            shell32 = ctypes.WinDLL("shell32")
+            ole32 = ctypes.WinDLL("ole32")
+            shell32.SHGetKnownFolderPath.argtypes = [
+                ctypes.POINTER(GUID), ctypes.c_uint, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+            ]
+            shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+            ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+            pointer = ctypes.c_void_p()
+            folder_id = GUID.parse("4BD8D571-6D19-48D3-BE97-422220080E43")  # FOLDERID_Music
+            if shell32.SHGetKnownFolderPath(ctypes.byref(folder_id), 0, None, ctypes.byref(pointer)) == 0:
+                try:
+                    return Path(ctypes.wstring_at(pointer.value))
+                finally:
+                    ole32.CoTaskMemFree(pointer)
+        except (OSError, AttributeError, ValueError):
+            pass
+    return Path.home() / "Music"
+
+
+def _home_from_layout() -> Path | None:
+    """The home folder of a source checkout or of an install made from one, if this is either.
+
+    From source it is this folder. The installer writes home.json next to Extractor.exe when it
+    installs from a checkout, naming the checkout. A downloaded release has no home.json.
+    """
+    if not getattr(sys, "frozen", False):
+        return SOURCE_DIR
+    try:
+        home = Path(json.loads((Path(sys.executable).resolve().parent / "home.json").read_text("utf-8-sig"))["home"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return home if home.is_dir() else None
+
+
+def configure_paths(data_dir: Path, music_dir: str = "") -> None:
+    """Decide where music is saved and where yt-dlp and ffmpeg are found.
+
+    A home folder (a checkout, or the folder named in home.json) holds the music subfolders,
+    cookie files, and usually yt-dlp.exe and ffmpeg.exe. Without one, as with a downloaded
+    release, music goes to Music/Extractor and setup downloads the tools into the data folder.
+    """
+    global HOME_DIR, DEFAULT_FOLDER, COOKIE_DIR, LEGACY_TOOLS, TOOLS_DIR
+    TOOLS_DIR = data_dir / "tools"
+    home = None if music_dir else _home_from_layout()
+    if home:
+        HOME_DIR, DEFAULT_FOLDER, COOKIE_DIR, LEGACY_TOOLS = home, "YoutubeExtracts", home, home
+    else:
+        music = Path(music_dir) if music_dir else known_music_dir()
+        HOME_DIR, DEFAULT_FOLDER, COOKIE_DIR, LEGACY_TOOLS = music, "Extractor", music / "Extractor", None
+
+
+def ytdlp_path() -> Path:
+    if LEGACY_TOOLS and (LEGACY_TOOLS / "yt-dlp.exe").is_file():
+        return LEGACY_TOOLS / "yt-dlp.exe"
+    return TOOLS_DIR / "yt-dlp.exe"
+
+
+def ffmpeg_dir() -> Path:
+    if LEGACY_TOOLS and (LEGACY_TOOLS / "ffmpeg.exe").is_file():
+        return LEGACY_TOOLS
+    return TOOLS_DIR / "ffmpeg"
+
+
+def missing_tools() -> list[str]:
+    missing = []
+    if not ytdlp_path().is_file():
+        missing.append("yt-dlp")
+    if not (ffmpeg_dir() / "ffmpeg.exe").is_file():
+        missing.append("ffmpeg")
+    return missing
+
+
+def tools_state() -> dict:
+    missing = missing_tools()
+    return {
+        "missing": [TOOL_DOWNLOADS[name]["label"] for name in missing],
+        "download_mb": sum(TOOL_DOWNLOADS[name]["approx_mb"] for name in missing),
+    }
 
 
 # --------------------------------------------------------------------------- helpers
@@ -176,13 +288,13 @@ def resolve_folder(value) -> Path:
         return path
     if path.drive or ".." in path.parts:
         raise ValueError("folder")
-    return APP_DIR / path
+    return HOME_DIR / path
 
 
 def list_folders(custom: list) -> list:
     names = [DEFAULT_FOLDER]
     try:
-        for entry in sorted(APP_DIR.iterdir(), key=lambda p: p.name.lower()):
+        for entry in sorted(HOME_DIR.iterdir(), key=lambda p: p.name.lower()):
             if (
                 entry.is_dir()
                 and not entry.name.startswith(".")
@@ -199,7 +311,7 @@ def list_folders(custom: list) -> list:
             continue
         # The default folder often holds the real library (one folder per playlist or person).
         try:
-            children = sorted((APP_DIR / name).iterdir(), key=lambda p: p.name.lower())
+            children = sorted((HOME_DIR / name).iterdir(), key=lambda p: p.name.lower())
         except OSError:
             children = []
         for child in children:
@@ -215,7 +327,7 @@ def list_cookie_sources() -> list:
     sources = [{"value": "none", "label": "No cookies"}]
     sources += [{"value": f"browser:{b}", "label": f"{b.title()} (live session)"} for b in BROWSERS]
     try:
-        for entry in sorted(APP_DIR.glob("*.txt"), key=lambda p: p.name.lower()):
+        for entry in sorted(COOKIE_DIR.glob("*.txt"), key=lambda p: p.name.lower()):
             if "cookie" in entry.name.lower() and entry.is_file():
                 age = (time.time() - entry.stat().st_mtime) / 3600
                 sources.append({"value": f"file:{entry.name}", "label": entry.name, "age_hours": round(age, 1)})
@@ -302,7 +414,7 @@ def open_path(raw, action: str) -> bool:
         return False
     path = Path(raw)
     if not path.is_absolute():
-        path = APP_DIR / path
+        path = HOME_DIR / path
     if action == "play":
         if path.is_file() and path.suffix.lower() in AUDIO_EXTS:
             os.startfile(str(path))
@@ -575,7 +687,7 @@ class Runner:
         self.seq = 0
         self.stop_requested = False
         self.created: list[Path] = []
-        self.version: dict = {"version": None, "age_days": None, "found": YTDLP.is_file()}
+        self.version: dict = {"version": None, "age_days": None, "found": ytdlp_path().is_file()}
         self._last_progress = 0.0
 
     # ---- shared plumbing
@@ -632,7 +744,7 @@ class Runner:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            cwd=str(APP_DIR),
+            cwd=str(Path(cmd[0]).parent),
             env=env,
             creationflags=NO_WINDOW,
         )
@@ -651,10 +763,11 @@ class Runner:
     def stop(self) -> bool:
         with self.lock:
             proc = self.proc
-            if proc:
-                self.stop_requested = True
+            running = bool(self.job and self.job["status"] == "running")
+            if proc or running:
+                self.stop_requested = True  # setup has no process: its download loop checks this
         if not proc:
-            return False
+            return running
         subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, creationflags=NO_WINDOW
         )
@@ -666,14 +779,15 @@ class Runner:
     # ---- yt-dlp version
 
     def refresh_version(self) -> None:
-        info = {"version": None, "age_days": None, "found": YTDLP.is_file()}
+        ytdlp = ytdlp_path()
+        info = {"version": None, "age_days": None, "found": ytdlp.is_file()}
         if info["found"]:
             try:
                 out = subprocess.run(
-                    [str(YTDLP), "--version"],
+                    [str(ytdlp), "--version"],
                     capture_output=True,
                     timeout=30,
-                    cwd=str(APP_DIR),
+                    cwd=str(ytdlp.parent),
                     creationflags=NO_WINDOW,
                 )
                 lines = out.stdout.decode("utf-8", "replace").strip().splitlines()
@@ -734,7 +848,7 @@ class Runner:
         if not cookies.startswith("file:"):
             return []
         name = cookies.split(":", 1)[1]
-        path = APP_DIR / name
+        path = COOKIE_DIR / name
         if Path(name).name != name or "cookie" not in name.lower() or not path.is_file():
             self.notice("warn", "cookie_missing", f"The cookie file {name} wasn't found, so no cookies were used.")
             return []
@@ -802,7 +916,8 @@ class Runner:
                     self.emit_log(f"[app] Couldn't remove {candidate.name}: {exc}")
 
     def _run_extract(self, url: str, fmt: str, folder: Path, cookies: str, filename: str) -> None:
-        if not YTDLP.is_file():
+        ytdlp = ytdlp_path()
+        if not ytdlp.is_file():
             self._finish("failed", error="ytdlp_missing")
             return
         try:
@@ -816,11 +931,11 @@ class Runner:
         result_file = result_dir / "result.txt"
         stem = filename.replace("%", "%%") if filename else "%(title)s"
         cmd = [
-            str(YTDLP),
+            str(ytdlp),
             "-f", "bestaudio/best",
             "--extract-audio",
             "--audio-format", fmt,
-            "--ffmpeg-location", str(APP_DIR),
+            "--ffmpeg-location", str(ffmpeg_dir()),
             "--no-playlist",
             "--retries", "10",
             "--fragment-retries", "10",
@@ -836,8 +951,8 @@ class Runner:
 
         shown = [Path(cmd[0]).name] + [a for a in cmd[1:] if not a.startswith(("download:" + PROGRESS_TAG))]
         self.emit_log("$ " + subprocess.list2cmdline(shown))
-        if not FFMPEG.is_file():
-            self.emit_log("[app] ffmpeg.exe is not next to the app; converting the audio will fail.")
+        if not (ffmpeg_dir() / "ffmpeg.exe").is_file():
+            self.emit_log("[app] ffmpeg.exe wasn't found; converting the audio will fail.")
 
         try:
             code = self._stream(cmd, self._on_extract_line)
@@ -907,10 +1022,10 @@ class Runner:
         code = 1
         try:
             self.emit_log("$ yt-dlp.exe -U")
-            code = self._stream([str(YTDLP), "-U"], self.emit_log)
+            code = self._stream([str(ytdlp_path()), "-U"], self.emit_log)
             if code == 0 and not self.stop_requested:
                 self.emit_log("$ yt-dlp.exe --rm-cache-dir")
-                self._stream([str(YTDLP), "--rm-cache-dir"], self.emit_log)
+                self._stream([str(ytdlp_path()), "--rm-cache-dir"], self.emit_log)
         except OSError as exc:
             self.emit_log(f"ERROR: {exc}")
         self.refresh_version()
@@ -929,6 +1044,187 @@ class Runner:
                 "copies and try again.",
             )
             self._finish("failed")
+
+    # ---- first-run setup: download yt-dlp and FFmpeg
+
+    def start_setup(self) -> dict | None:
+        missing = missing_tools()
+        if not missing:
+            return None
+        snap = self._begin({
+            "id": secrets.token_hex(4),
+            "kind": "setup",
+            "status": "running",
+            "stage": "resolving",
+            "items": [TOOL_DOWNLOADS[name]["label"] for name in missing],
+            "item": None,
+            "progress": None,
+            "downloaded": None,
+            "total": None,
+            "speed": None,
+            "eta": None,
+            "error": None,
+            "detail": None,
+            "started": time.time(),
+        })
+        threading.Thread(target=self._run_setup, args=(missing,), daemon=True).start()
+        return snap
+
+    def _run_setup(self, missing: list[str]) -> None:
+        leftovers: list[Path] = []
+        try:
+            TOOLS_DIR.mkdir(parents=True, exist_ok=True)
+            plan = []
+            for name in missing:
+                spec = TOOL_DOWNLOADS[name]
+                plan.append((name, spec, self._published_sha256(spec), self._remote_size(spec["url"])))
+            total = sum(size or spec["approx_mb"] * 1_000_000 for _, spec, _, size in plan)
+            done = 0
+            for name, spec, expected, _size in plan:
+                part = TOOLS_DIR / (spec["asset"] + ".part")
+                leftovers.append(part)
+                self.emit_log(f"[app] Downloading {spec['asset']} from {spec['url']}")
+                started = time.monotonic()
+                digest, got = self._download(
+                    spec["url"], part,
+                    lambda got, base=done, label=spec["label"], t0=started: self._setup_progress(label, base, got, total, t0),
+                )
+                if digest != expected:
+                    raise SetupError("setup_checksum", f"{spec['asset']} didn't match its published SHA-256.")
+                self.emit_log(f"[app] SHA-256 matches the published checksum ({digest[:16]}…)")
+                done += got
+                if name == "yt-dlp":
+                    os.replace(part, TOOLS_DIR / "yt-dlp.exe")
+                else:
+                    self.update_job(stage="installing", item=spec["label"])
+                    leftovers.append(TOOLS_DIR / "ffmpeg.new")
+                    self._install_ffmpeg(part)
+                    part.unlink()
+            self.emit_log(f"[app] Tools are in {TOOLS_DIR}")
+            self.refresh_version()
+            self.hub.publish({"type": "tools", "tools": tools_state()})
+            self.notice("ok", "setup_done", "All set: yt-dlp and FFmpeg are installed.")
+            self._finish("done", progress=100.0)
+        except Stopped:
+            self._finish("stopped")
+        except SetupError as exc:
+            self.emit_log(f"ERROR: {exc}")
+            self._finish("failed", error=exc.code, detail=exc.detail)
+        except zipfile.BadZipFile as exc:
+            self.emit_log(f"ERROR: {exc}")
+            self._finish("failed", error="setup_source", detail="The FFmpeg download isn't a valid zip file.")
+        except OSError as exc:
+            self.emit_log(f"ERROR: {exc}")
+            self._finish("failed", error="setup_disk", detail=str(exc))
+        finally:
+            for path in leftovers:
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+
+    def _open_url(self, url: str, method: str = "GET"):
+        request = urllib.request.Request(url, method=method, headers={"User-Agent": f"{APP_NAME}/{__version__}"})
+        try:
+            response = urllib.request.urlopen(request, timeout=30)
+        except (OSError, http.client.HTTPException) as exc:  # URLError and timeouts are OSErrors
+            raise SetupError("setup_network", str(getattr(exc, "reason", None) or exc)) from exc
+        host = (urllib.parse.urlsplit(response.geturl()).hostname or "").lower()
+        if host != "github.com" and not host.endswith(".githubusercontent.com"):
+            response.close()
+            raise SetupError("setup_source", f"The download was redirected to an unexpected host ({host}).")
+        return response
+
+    def _published_sha256(self, spec: dict) -> str:
+        with self._open_url(spec["sums"]) as response:
+            try:
+                text = response.read(1_000_000).decode("utf-8", "replace")
+            except (OSError, http.client.HTTPException) as exc:
+                raise SetupError("setup_network", str(exc)) from exc
+        for line in text.splitlines():
+            fields = line.split()
+            if len(fields) == 2 and fields[1].lstrip("*") == spec["asset"] and re.fullmatch(r"[0-9a-fA-F]{64}", fields[0]):
+                return fields[0].lower()
+        raise SetupError("setup_source", f"No published checksum was found for {spec['asset']}.")
+
+    def _remote_size(self, url: str) -> int | None:
+        try:
+            with self._open_url(url, "HEAD") as response:
+                return int(response.headers.get("Content-Length") or 0) or None
+        except (SetupError, ValueError):
+            return None
+
+    def _download(self, url: str, dest: Path, on_progress) -> tuple[str, int]:
+        response = self._open_url(url)
+        digest = hashlib.sha256()
+        got = 0
+        with response, open(dest, "wb") as out:
+            expected = int(response.headers.get("Content-Length") or 0)
+            while True:
+                if self.stop_requested:
+                    raise Stopped()
+                try:
+                    chunk = response.read(256 * 1024)
+                except (OSError, http.client.HTTPException) as exc:
+                    raise SetupError("setup_network", str(exc)) from exc
+                if not chunk:
+                    break
+                out.write(chunk)
+                digest.update(chunk)
+                got += len(chunk)
+                on_progress(got)
+        if expected and got != expected:
+            raise SetupError("setup_network", "The download was cut short.")
+        return digest.hexdigest(), got
+
+    def _setup_progress(self, label: str, base: int, got: int, total: int, started: float) -> None:
+        now = time.monotonic()
+        if now - self._last_progress < 0.1:
+            return
+        self._last_progress = now
+        done = base + got
+        total = max(total, done)
+        speed = got / max(0.001, now - started)
+        self.update_job(
+            stage="downloading",
+            item=label,
+            progress=done / total * 100,
+            downloaded=done,
+            total=total,
+            speed=speed,
+            eta=(total - done) / speed if speed > 0 else None,
+        )
+
+    def _install_ffmpeg(self, archive_path: Path) -> None:
+        """Unpack ffmpeg.exe, ffprobe.exe, their DLLs and the licence into TOOLS_DIR/ffmpeg."""
+        staging = TOOLS_DIR / "ffmpeg.new"
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True)
+        with zipfile.ZipFile(archive_path) as archive:
+            for info in archive.infolist():
+                parts = info.filename.split("/")
+                name = parts[-1]
+                if info.is_dir() or not name:
+                    continue
+                lower = name.lower()
+                in_bin = len(parts) >= 2 and parts[-2] == "bin"
+                wanted = (in_bin and (lower in ("ffmpeg.exe", "ffprobe.exe") or lower.endswith(".dll"))) or (
+                    len(parts) == 2 and lower.startswith("license")
+                )
+                if not wanted:
+                    continue
+                if self.stop_requested:
+                    raise Stopped()
+                with archive.open(info) as source, open(staging / name, "wb") as target:
+                    shutil.copyfileobj(source, target, 1024 * 1024)
+        if not ((staging / "ffmpeg.exe").is_file() and (staging / "ffprobe.exe").is_file()):
+            raise SetupError("setup_source", "The FFmpeg download didn't contain ffmpeg.exe and ffprobe.exe.")
+        final = TOOLS_DIR / "ffmpeg"
+        shutil.rmtree(final, ignore_errors=True)
+        os.replace(staging, final)
 
 
 # --------------------------------------------------------------------------- HTTP
@@ -1085,6 +1381,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/extract": self._extract,
             "/api/stop": self._stop,
             "/api/update": self._update,
+            "/api/setup": self._setup,
             "/api/browse": self._browse,
             "/api/open": self._open,
             "/api/prefs": self._prefs,
@@ -1168,7 +1465,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"stopped": self.app.runner.stop()})
 
     def _update(self, body: dict) -> None:
-        if not YTDLP.is_file():
+        if not ytdlp_path().is_file():
             self._json(400, {"error": "ytdlp_missing"})
             return
         try:
@@ -1178,19 +1475,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(200, {"job": job})
 
+    def _setup(self, body: dict) -> None:
+        try:
+            job = self.app.runner.start_setup()
+        except Busy:
+            self._json(409, {"error": "busy"})
+            return
+        self._json(200, {"job": job, "tools": tools_state()})
+
     def _browse(self, body: dict) -> None:
-        initial = body.get("initial") if isinstance(body.get("initial"), str) else ""
+        initial =body.get("initial") if isinstance(body.get("initial"), str) else ""
         try:
             start = str(resolve_folder(initial))
         except ValueError:
-            start = str(APP_DIR)
+            start = str(HOME_DIR)
         if not Path(start).is_dir():
-            start = str(APP_DIR)
+            start = str(HOME_DIR)
         path = self.app.pick_folder(start)
         if path:
             inside = Path(path).resolve()
             try:
-                relative = inside.relative_to(APP_DIR)
+                relative = inside.relative_to(HOME_DIR)
                 path = str(relative) if str(relative) != "." else DEFAULT_FOLDER
                 self.app.store.update_prefs({"folder": path})
             except ValueError:
@@ -1280,10 +1585,10 @@ class App:
             "prefs": {
                 "format": prefs.get("format", "mp3"),
                 "folder": prefs.get("folder", DEFAULT_FOLDER),
-                "cookies": prefs.get("cookies", "browser:chrome"),
+                "cookies": prefs.get("cookies", "none"),
             },
             "history": self.store.history(),
-            "ffmpeg_found": FFMPEG.is_file(),
+            "tools": tools_state(),
             "app_version": __version__,
             **snap,
         }
@@ -1454,7 +1759,7 @@ class App:
             return
         job = event["job"]
         status = job.get("status")
-        if job.get("kind") != "extract":
+        if job.get("kind") not in ("extract", "setup"):
             self._show_progress(Taskbar.INDETERMINATE if status == "running" else Taskbar.NONE)
             return
         if status == "running":
@@ -1538,9 +1843,11 @@ def main() -> None:
     parser.add_argument("--browser", action="store_true", help="use an Edge/Chrome app window, not the native one")
     parser.add_argument("--port", type=int, default=0, help=f"port to serve on (default {PREFERRED_PORT})")
     parser.add_argument("--token", default="", help="fixed API token (dev only)")
-    parser.add_argument("--data-dir", default="", help="where to keep prefs and history")
+    parser.add_argument("--data-dir", default="", help="where to keep prefs, history and downloaded tools")
+    parser.add_argument("--music-dir", default="", help="save music under this folder, as a downloaded copy does")
     args = parser.parse_args()
 
+    configure_paths(Path(args.data_dir) if args.data_dir else DEFAULT_DATA_DIR, args.music_dir)
     app = App(args)
     app.data_dir.mkdir(parents=True, exist_ok=True)
     if sys.stderr is None or sys.stdout is None:  # pythonw: keep errors in a log file

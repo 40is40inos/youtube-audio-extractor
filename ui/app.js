@@ -31,7 +31,11 @@
     unsupported: 'yt-dlp doesn’t recognise this link.',
     ffmpeg: 'ffmpeg.exe is missing, so the audio couldn’t be converted.',
     folder: 'Couldn’t create the save folder.',
-    ytdlp_missing: 'yt-dlp.exe wasn’t found next to the app.',
+    ytdlp_missing: 'yt-dlp isn’t installed yet. Press Download tools.',
+    setup_network: 'Couldn’t download the tools. Check your internet connection and try again.',
+    setup_checksum: 'A download didn’t match its published checksum, so it was thrown away. Try again.',
+    setup_source: 'GitHub sent something unexpected. Try again in a little while.',
+    setup_disk: 'Couldn’t save the tools to disk. Check that the drive has free space.',
   };
 
   const ICONS = {
@@ -105,6 +109,7 @@
     logSeq: 0,
     logCount: 0,
     version: null,
+    tools: { missing: [], download_mb: 0 },
     notices: [],
     clipUrl: null,
     clipDismissed: '',
@@ -533,18 +538,40 @@
     return 'Something went wrong. Open the log for details.';
   }
 
+  function needsSetup() {
+    return Boolean(S.tools && S.tools.missing && S.tools.missing.length);
+  }
+
+  function setupItems(job) {
+    const items = (job && job.items) || S.tools.missing;
+    return items.join(' and ');
+  }
+
+  function setupPitch() {
+    const missing = S.tools.missing;
+    const size = `About ${S.tools.download_mb} MB from GitHub, once.`;
+    if (missing.length > 1) {
+      return { title: 'Extractor needs two free tools', sub: `yt-dlp fetches the audio and FFmpeg converts it. ${size}` };
+    }
+    const tool = missing[0];
+    const role = tool === 'FFmpeg' ? 'FFmpeg converts the audio.' : 'yt-dlp fetches the audio.';
+    return { title: `Extractor needs ${tool}`, sub: `${role} ${size}` };
+  }
+
   function viewOf() {
     const job = S.job;
     if (job && job.status === 'running') return 'running';
     if (job && job.id !== S.ackId) return job.status;
+    if (needsSetup()) return 'setup';
     if (S.previewLoading && !S.preview) return 'loading';
     if (S.preview) return 'ready';
     return 'empty';
   }
 
   function metricText(job, fmt) {
-    if (job.stage === 'resolving') return 'Contacting YouTube…';
+    if (job.stage === 'resolving') return job.kind === 'setup' ? 'Contacting GitHub…' : 'Contacting YouTube…';
     if (job.stage === 'converting') return `ffmpeg is writing the ${fmt} file…`;
+    if (job.stage === 'installing') return `Unpacking ${job.item}…`;
     const parts = [];
     if (job.total) parts.push(job.downloaded != null ? `${fmtBytes(job.downloaded)} of ${fmtBytes(job.total)}` : fmtBytes(job.total));
     if (job.speed) parts.push(`${fmtBytes(job.speed)}/s`);
@@ -566,7 +593,22 @@
     let sub = 'Press Ctrl+V anywhere, or use the link field.';
     let slot = 'sub';
 
-    if (view === 'loading') {
+    const setup = Boolean(job && job.kind === 'setup');
+    if (view === 'setup') {
+      const pitch = setupPitch();
+      stage = 'First run';
+      title = pitch.title;
+      sub = pitch.sub;
+    } else if (setup && running) {
+      stage = { resolving: 'Setting up', downloading: `Downloading ${job.item}`, installing: `Installing ${job.item}` }[job.stage] || 'Setting up';
+      title = `Getting ${setupItems(job)}`;
+      slot = 'metrics';
+      el.metricLine.textContent = metricText(job, fmt);
+    } else if (setup && (view === 'failed' || view === 'stopped')) {
+      stage = view === 'failed' ? 'Setup failed' : 'Setup stopped';
+      title = `Getting ${setupItems(job)}`;
+      sub = view === 'failed' ? errorText(job) : 'Stopped before it finished. Nothing was installed.';
+    } else if (view === 'loading') {
       stage = 'Looking up';
       title = 'Reading the link…';
       sub = hostOf(S.previewFor);
@@ -608,10 +650,11 @@
   function renderButton() {
     const running = S.job && S.job.status === 'running';
     const updating = S.update && S.update.status === 'running';
-    const mode = running ? (S.stopArmed ? 'confirm' : 'stop') : 'extract';
+    const idle = needsSetup() ? 'setup' : 'extract';
+    const mode = running ? (S.stopArmed ? 'confirm' : 'stop') : idle;
     el.go.dataset.mode = mode;
     el.go.disabled = Boolean(updating && !running);
-    let label = 'Extract audio';
+    let label = mode === 'setup' ? 'Download tools' : 'Extract audio';
     if (mode === 'stop') label = 'Stop';
     else if (mode === 'confirm') label = 'Click again to stop';
     else if (updating) label = 'Updating yt-dlp…';
@@ -621,7 +664,7 @@
   function renderUpdate() {
     const updating = Boolean(S.update && S.update.status === 'running');
     el.app.toggleAttribute('data-updating', updating);
-    el.updateBtn.disabled = updating || Boolean(S.job && S.job.status === 'running');
+    el.updateBtn.disabled = updating || needsSetup() || Boolean(S.job && S.job.status === 'running');
     el.updateText.textContent = updating ? 'Updating…' : 'Update yt-dlp';
   }
 
@@ -631,7 +674,7 @@
     let text = 'yt-dlp';
     if (v.found === false) {
       health = 'missing';
-      text = 'yt-dlp.exe not found';
+      text = 'yt-dlp not installed';
     } else if (v.version) {
       const old = v.age_days != null && v.age_days > 60;
       health = old ? 'old' : 'ok';
@@ -653,6 +696,8 @@
     }
     const prev = S.job;
     S.job = job;
+    // A finished setup has nothing to show: go straight back to the link prompt (its notice says it worked).
+    if (job.kind === 'setup' && job.status === 'done') S.ackId = job.id;
     // A run the current preview doesn't describe (started early, or the page was reloaded):
     // put its own artwork on the record.
     if (job.thumb && job.id !== S.ackId && !(S.preview && S.previewFor === job.url)) setLabel(job.thumb, job.thumb);
@@ -685,11 +730,35 @@
     // The button turns from Stop back into Extract at the same spot. A Stop click that lands
     // just after the run finished must not start a new one.
     if (Date.now() - S.finishedAt < 900) return;
-    startExtract();
+    if (needsSetup()) startSetup();
+    else startExtract();
+  }
+
+  async function startSetup() {
+    if (S.starting || (S.job && S.job.status === 'running') || (S.update && S.update.status === 'running')) return;
+    if (S.job) S.ackId = S.job.id;
+    clearNotices();
+    S.starting = true;
+    try {
+      const res = await api('/api/setup', {});
+      if (res.tools) S.tools = res.tools;
+      if (res.job && (!S.job || S.job.id !== res.job.id)) setJob(res.job);
+      else render();
+    } catch (err) {
+      const text = err.status === 409 ? 'Something is already running. Wait for it, or stop it first.' : 'Couldn’t start the download.';
+      addNotice({ level: 'error', code: 'start', text });
+      render();
+    } finally {
+      S.starting = false;
+    }
   }
 
   async function startExtract() {
     if (S.starting || (S.job && S.job.status === 'running') || (S.update && S.update.status === 'running')) return;
+    if (needsSetup()) {
+      nudge(el.go); // Enter in the link field: the tools come first
+      return;
+    }
     const url = normalizeUrl(el.url.value);
     if (!url) {
       nudge(el.urlWrap);
@@ -1034,7 +1103,7 @@
   }
 
   function clearNotices() {
-    S.notices = S.notices.filter((n) => n.code === 'ffmpeg');
+    S.notices = [];
     renderNotices();
   }
 
@@ -1142,6 +1211,10 @@
       case 'version':
         S.version = msg.version;
         renderVersion();
+        break;
+      case 'tools':
+        S.tools = msg.tools;
+        render();
         break;
       case 'notice':
         addNotice(msg);
@@ -1282,9 +1355,7 @@
     S.version = state.version;
     renderVersion();
     if (state.app_version) document.querySelector('.brand').title = `Extractor ${state.app_version}`;
-    if (!state.ffmpeg_found) {
-      addNotice({ level: 'warn', code: 'ffmpeg', text: 'ffmpeg.exe isn’t next to the app, so converting audio will fail. See the README.' });
-    }
+    if (state.tools) S.tools = state.tools;
     render();
     engine.kick(); // swings the tonearm in from its boot angle
     S.booted = true;

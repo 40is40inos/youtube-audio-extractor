@@ -16,13 +16,33 @@ turntable:
 It runs as a native Windows app (`Extractor.exe`) with its own icon, a dark title bar, a Start menu entry and an
 uninstaller in Settings > Apps.
 
+## Download
+
+For Windows 10 and 11 (64-bit).
+
+1. Download `Extractor-<version>-win64.zip` from the [latest release](https://github.com/40is40inos/youtube-audio-extractor/releases/latest).
+2. Extract it (right-click > **Extract All**) and double-click **Install Extractor.bat**. The app isn't code-signed,
+   so Windows may warn that it comes from the internet or is unrecognised: choose **More info > Run anyway**.
+3. Extractor opens. Press **Download tools** once. It fetches [yt-dlp](https://github.com/yt-dlp/yt-dlp) and
+   [FFmpeg](https://github.com/yt-dlp/FFmpeg-Builds) (about 115 MB) from their official GitHub releases and checks each
+   against its published SHA-256 before using it.
+
+It installs for your Windows user only (no administrator rights), to `%LOCALAPPDATA%\Programs\Extractor`, with Start
+menu and desktop shortcuts. Audio goes to `Music\Extractor` unless you pick another folder. To try it without
+installing, run `Extractor\Extractor.exe` from the extracted folder.
+
+To remove it, use Settings > Apps > Installed apps > Extractor > Uninstall. That also deletes the downloaded tools;
+your music is never touched, and preferences stay in `%LOCALAPPDATA%\YouTubeAudioExtractor` (delete that folder to
+forget them).
+
 ## Features
 
 - Formats: `mp3`, `opus`, `m4a`, `flac`, `wav`, `aac`, or `best` (no conversion). A one-line hint explains each one.
-- Save to any subfolder of the home folder (and the folders inside `YoutubeExtracts`), or pick another folder with
-  **Browse**.
-- Cookies from a browser (Chrome, Firefox, Edge, Brave) or from an exported `cookies.txt`, for videos that need a
-  signed-in session. Warns when a cookie file is old or looks signed out.
+- Save to `Music\Extractor` or another folder in your Music library (from source: any subfolder of the home folder,
+  and the folders inside `YoutubeExtracts`), or pick any folder with **Browse**.
+- Cookies from a browser (Chrome, Firefox, Edge, Brave) or from an exported `cookies.txt` (put it in
+  `Music\Extractor`, or in the home folder when running from source), for videos that need a signed-in session. Warns
+  when a cookie file is old or looks signed out.
 - Optional custom file name.
 - Spots a YouTube link in your clipboard and offers to use it. **Ctrl+V** anywhere pastes into the link field and
   **Enter** starts the extraction.
@@ -34,20 +54,17 @@ uninstaller in Settings > Apps.
 - One instance at a time: launching it again brings the open window to the front.
 - Respects Windows' "reduce motion" setting: the record stops spinning and transitions become simple fades.
 
-## The home folder
+## Where things go
 
-Extractor's home is this folder: it holds the tools and your music. Put these executables here (they are not in the
-repo):
+- **Downloaded release:** music goes to `Music\Extractor`; yt-dlp and FFmpeg live in
+  `%LOCALAPPDATA%\YouTubeAudioExtractor\tools`, where **Download tools** puts them and **Update yt-dlp** updates them.
+- **From source:** this folder is Extractor's *home*. It holds the music folders (`YoutubeExtracts` by default) and
+  cookie files, and you can put `yt-dlp.exe`, `ffmpeg.exe` and `ffprobe.exe` here yourself (they are not in the repo).
+  If they are missing, **Download tools** fetches them into the data folder above instead.
 
-- `yt-dlp.exe` from [yt-dlp releases](https://github.com/yt-dlp/yt-dlp/releases)
-- `ffmpeg.exe` and `ffprobe.exe` from an [ffmpeg Windows build](https://ffmpeg.org/download.html#build-windows)
+## Build and install from source
 
-The installed app reads the home folder's location from the `home.json` the installer writes next to
-`Extractor.exe`, so the program and your music stay separate.
-
-## Install
-
-1. Install Python 3.10+, then build the app once (this creates a private `.venv` here, so your Python stays clean):
+1. Install Python 3.10+, then build the app (this creates a private `.venv` here, so your Python stays clean):
 
    ```bash
    python -m venv .venv
@@ -55,12 +72,16 @@ The installed app reads the home folder's location from the `home.json` the inst
    .venv\Scripts\python build.py
    ```
 
-2. Double-click **Install Extractor.bat**. It installs for your Windows user only (no admin rights) to
-   `%LOCALAPPDATA%\Programs\Extractor`, adds Start menu and desktop shortcuts, registers an uninstaller under
-   Settings > Apps, and opens the app. Run it again after rebuilding to update in place.
+   This writes `dist\Extractor\Extractor.exe` and the release zip `dist\Extractor-<version>-win64.zip`.
 
-To remove it, use Settings > Apps > Installed apps > Extractor > Uninstall. Your music, yt-dlp and ffmpeg are never
-touched; preferences stay in `%LOCALAPPDATA%\YouTubeAudioExtractor` (delete that folder to forget them).
+2. Double-click **Install Extractor.bat**. Installed from a checkout, the app keeps this folder as its home (the
+   installer records it in `home.json` next to `Extractor.exe`). Run it again after rebuilding to update in place.
+
+To publish a release, attach the zip to a GitHub release:
+
+```bash
+gh release create v<version> dist/Extractor-<version>-win64.zip --title "Extractor <version>" --notes "…"
+```
 
 ## Run from source
 
@@ -77,7 +98,8 @@ details, into `dist\Extractor\Extractor.exe` with PyInstaller.
 - The server only accepts requests from this machine that carry a random per-launch token, so web pages can't drive it.
 - Preferences and the recent list are kept in `%LOCALAPPDATA%\YouTubeAudioExtractor\state.json`.
 - For development, `python app.py --dev --port 47380 --token devtoken` serves the UI without opening a window or
-  shutting down; open `http://127.0.0.1:47380/#t=devtoken`. `--browser` forces the Edge app window.
+  shutting down; open `http://127.0.0.1:47380/#t=devtoken`. `--browser` forces the Edge app window. To see what a
+  downloaded copy does on first run, add `--data-dir <empty folder> --music-dir <empty folder>`.
 - The version lives in `app.py` (`__version__`); it is shown on hover over the logo and in the exe's Properties.
 
 The previous Tkinter interface is still here as `audio_extractor_gui.py` (`pythonw audio_extractor_gui.py`).
