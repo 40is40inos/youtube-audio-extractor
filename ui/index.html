@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0a0c">
+<title>Extractor</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<div class="app" id="app" data-state="empty" data-booting>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="11" fill="#1c1c21"/>
+        <circle cx="12" cy="12" r="8" fill="none" stroke="#2c2c33" stroke-width=".8"/>
+        <circle cx="12" cy="12" r="5.5" fill="none" stroke="#2c2c33" stroke-width=".8"/>
+        <circle class="brand-label" cx="12" cy="12" r="3.4"/>
+        <circle cx="12" cy="12" r=".9" fill="#0a0a0c"/>
+      </svg>
+      <span class="brand-name">Extractor</span>
+      <span class="brand-sub">YouTube to audio</span>
+    </div>
+    <div class="tool">
+      <span class="ver" id="ver" data-health="unknown"><span class="ver-dot"></span><span id="verText">yt-dlp</span></span>
+      <button type="button" class="btn ghost sm" id="updateBtn">
+        <svg class="ico spin-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3"/></svg>
+        <span id="updateText">Update yt-dlp</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="deck" aria-label="Turntable">
+      <div class="ambient" aria-hidden="true">
+        <img class="amb" id="ambA" alt="">
+        <img class="amb" id="ambB" alt="">
+      </div>
+
+      <div class="deck-stage">
+        <div class="turntable" id="turntable" aria-hidden="true">
+          <div class="glow"></div>
+          <div class="mat"></div>
+
+          <svg class="ring" viewBox="0 0 1150 1000">
+            <circle class="ring-track" cx="500" cy="500" r="452"/>
+            <circle class="ring-fill" id="ringFill" cx="500" cy="500" r="452" pathLength="100" transform="rotate(-90 500 500)"/>
+            <circle class="ring-spin" cx="500" cy="500" r="452" pathLength="100"/>
+            <g class="arm-rest">
+              <rect x="996" y="742" width="28" height="44" rx="8"/>
+              <circle cx="1010" cy="748" r="11"/>
+            </g>
+          </svg>
+
+          <div class="disc" id="disc">
+            <div class="record" id="record">
+              <div class="grooves"></div>
+              <div class="label" id="label">
+                <div class="label-blank">
+                  <span class="lb-top">Extractor</span>
+                  <span class="lb-mid">Side A</span>
+                  <span class="lb-bot">33&#8531; rpm</span>
+                </div>
+                <img class="label-img" id="labelImg" alt="">
+              </div>
+            </div>
+            <div class="sheen"></div>
+          </div>
+          <div class="spindle"></div>
+
+          <div class="done-badge">
+            <svg viewBox="0 0 48 48"><path pathLength="1" d="M14 24.5l7 7L34.5 17"/></svg>
+          </div>
+
+          <div class="arm-shadow" id="armShadow">
+            <svg viewBox="0 0 1150 1000">
+              <defs><filter id="armBlur" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="9"/></filter></defs>
+              <g filter="url(#armBlur)" fill="#000">
+                <rect x="1002" y="2" width="56" height="64" rx="12"/>
+                <path d="M1030 100 L1030 668" stroke="#000" stroke-width="14" stroke-linecap="round"/>
+                <rect x="1014" y="660" width="32" height="92" rx="7" transform="rotate(18 1030 680)"/>
+                <circle cx="1030" cy="100" r="54"/>
+              </g>
+            </svg>
+          </div>
+          <div class="arm" id="arm">
+            <svg viewBox="0 0 1150 1000">
+              <defs>
+                <linearGradient id="armMetal" x1="0" x2="1" y1="0" y2="0">
+                  <stop offset="0" stop-color="#55555d"/>
+                  <stop offset=".42" stop-color="#e4e4ea"/>
+                  <stop offset=".58" stop-color="#8c8c95"/>
+                  <stop offset="1" stop-color="#3f3f46"/>
+                </linearGradient>
+                <radialGradient id="armBase" cx=".38" cy=".32" r=".9">
+                  <stop offset="0" stop-color="#43434b"/>
+                  <stop offset="1" stop-color="#131316"/>
+                </radialGradient>
+                <linearGradient id="armWeight" x1="0" x2="1">
+                  <stop offset="0" stop-color="#26262c"/>
+                  <stop offset=".5" stop-color="#76767f"/>
+                  <stop offset="1" stop-color="#1f1f24"/>
+                </linearGradient>
+              </defs>
+              <rect x="1002" y="2" width="56" height="64" rx="12" fill="url(#armWeight)"/>
+              <rect x="1002" y="38" width="56" height="5" fill="#000" opacity=".35"/>
+              <path d="M1030 100 L1030 668" stroke="url(#armMetal)" stroke-width="13" stroke-linecap="round" fill="none"/>
+              <g transform="rotate(18 1030 680)">
+                <rect x="1014" y="660" width="32" height="92" rx="7" fill="#25252a" stroke="#ffffff" stroke-opacity=".14" stroke-width="2"/>
+                <rect class="arm-cart" x="1019" y="712" width="22" height="34" rx="4"/>
+                <path d="M1046 676 l20 -7" stroke="#a3a3ab" stroke-width="5" stroke-linecap="round"/>
+              </g>
+              <circle cx="1030" cy="100" r="54" fill="url(#armBase)" stroke="#ffffff" stroke-opacity=".09" stroke-width="2"/>
+              <circle cx="1030" cy="100" r="24" fill="url(#armMetal)"/>
+              <circle cx="1030" cy="100" r="7" fill="#17171a"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="readout" aria-live="polite">
+        <div class="stage"><span class="stage-dot"></span><span id="stageText">Ready</span></div>
+        <div class="title-box"><h1 class="title" id="title">Paste a YouTube link</h1></div>
+        <div class="slot">
+          <p class="sub" id="sub">Press Ctrl+V anywhere, or use the link field.</p>
+          <div class="metrics">
+            <span class="pct"><span id="pct">0</span><span class="pct-sign">%</span></span>
+            <span class="metric-line" id="metricLine"></span>
+          </div>
+          <div class="result">
+            <button type="button" class="btn solid" id="playBtn">
+              <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path class="fill" d="M5 3.2v9.6c0 .5.5.8.9.5l7.2-4.8a.6.6 0 0 0 0-1L5.9 2.7c-.4-.3-.9 0-.9.5z"/></svg>
+              Play
+            </button>
+            <button type="button" class="btn ghost" id="revealBtn">
+              <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5c0-.6.4-1 1-1h3l1.5 1.5H13c.6 0 1 .4 1 1V12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1z"/></svg>
+              Show in folder
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="Extraction settings">
+      <form class="form" id="form" novalidate autocomplete="off">
+        <fieldset class="fields" id="fields">
+        <div class="field r1">
+          <label class="field-label" for="url">Link</label>
+          <div class="input url-input" id="urlWrap">
+            <svg class="ico lead" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.8 9.2a3 3 0 0 0 4.3 0l2-2a3 3 0 0 0-4.3-4.3l-.9.9M9.2 6.8a3 3 0 0 0-4.3 0l-2 2a3 3 0 0 0 4.3 4.3l.9-.9"/></svg>
+            <input id="url" type="text" inputmode="url" placeholder="youtube.com/watch?v=…" spellcheck="false" autocomplete="off">
+            <button type="button" class="chip" id="pasteBtn">Paste</button>
+          </div>
+          <div class="clip" id="clip" data-open="false">
+            <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3H4.5c-.6 0-1 .4-1 1v9c0 .6.4 1 1 1h7c.6 0 1-.4 1-1V4c0-.6-.4-1-1-1h-1M6 2h4v2H6z"/></svg>
+            <span class="clip-text">Link in clipboard <b id="clipText"></b></span>
+            <button type="button" class="chip accent" id="clipUse" tabindex="-1">Use it</button>
+            <button type="button" class="icon-btn sm" id="clipDismiss" aria-label="Dismiss" tabindex="-1">
+              <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="field r2">
+          <span class="field-label" id="fmtLabel">Format</span>
+          <div class="seg" id="seg" role="radiogroup" aria-labelledby="fmtLabel">
+            <span class="seg-ind" id="segInd"></span>
+          </div>
+          <p class="hint" id="fmtHint"></p>
+        </div>
+
+        <div class="row r3">
+          <div class="field">
+            <label class="field-label" for="folder">Save to</label>
+            <div class="select-row">
+              <select id="folder"></select>
+              <button type="button" class="icon-btn" id="browseBtn" title="Choose another folder" aria-label="Choose another folder">
+                <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5c0-.6.4-1 1-1h3l1.5 1.5H13c.6 0 1 .4 1 1V12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1zM8 7.5v3.5M6.25 9.25h3.5"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="field">
+            <label class="field-label" for="cookies">Cookies</label>
+            <select id="cookies"></select>
+          </div>
+        </div>
+
+        <div class="field r4">
+          <label class="field-label" for="fname">File name <span class="opt">optional</span></label>
+          <div class="input">
+            <input id="fname" type="text" placeholder="Uses the video title" spellcheck="false" autocomplete="off">
+          </div>
+        </div>
+        </fieldset>
+
+        <div class="r5">
+          <button type="button" class="primary" id="go" data-mode="extract">
+            <span class="go-label" id="goLabel">Extract audio</span>
+            <kbd class="go-kbd">Enter</kbd>
+          </button>
+          <div class="notices" id="notices" aria-live="polite"></div>
+        </div>
+      </form>
+
+      <div class="recent r6">
+        <div class="recent-head">
+          <h2>Recent</h2>
+          <span class="recent-count" id="recentCount"></span>
+        </div>
+        <ol class="recent-list" id="recent"></ol>
+        <p class="recent-empty" id="recentEmpty">Saved tracks land here.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="statusbar">
+    <button type="button" class="log-toggle" id="logToggle" aria-expanded="false" aria-controls="drawer">
+      <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5l3 3-3 3M8 11h5"/></svg>
+      Log <span class="badge" id="logCount">0</span>
+    </button>
+    <span class="last-line" id="lastLine"></span>
+    <span class="conn" id="conn">Disconnected. Relaunch the app.</span>
+  </footer>
+
+  <div class="drawer" id="drawer" role="dialog" aria-label="Log" aria-modal="false" inert>
+    <div class="drawer-head">
+      <h2>Log</h2>
+      <div class="drawer-actions">
+        <button type="button" class="btn ghost sm" id="copyLog">Copy</button>
+        <button type="button" class="icon-btn sm" id="closeLog" aria-label="Close log">
+          <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+        </button>
+      </div>
+    </div>
+    <pre class="log" id="log" tabindex="0"></pre>
+  </div>
+</div>
+</body>
+</html>

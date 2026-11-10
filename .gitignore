@@ -5,6 +5,8 @@
 !/.gitignore
 !/.gitattributes
 !/README.md
+!/app.py
+!/ui/
 !/audio_extractor_gui.py
 !/Launch_Extractor_GUI.bat
 !/rip.sh
